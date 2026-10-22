@@ -8,6 +8,10 @@
  *   https://www.cardmarket.com/Data/Download. Pokémon is game id 6.
  * - The international set list from https://pokemontcg.io, to recognise which set a product
  *   belongs to (the app shows that set's logo) and which products are international.
+ * - The sealed product list of pokemontcgapi.com (through the Binder API), to link each product
+ *   to its pokemontcgapi.com id (`apiId`) by name. The app uses that id to show the product
+ *   photo. Only ids are stored here: no photos and no pokemontcgapi.com prices, which may not
+ *   be redistributed. Needs BINDER_API_TOKEN; without it yesterday's ids are reused.
  *
  * Cardmarket has no language field, so the region is derived:
  * 1. an explicit marker in a product name ("S-Ch", "Korean", "Indonesian", "JP", ...);
@@ -31,6 +35,8 @@ const PRICES_URL = `${BASE}/priceGuide/price_guide_6.json`;
 const SETS_URL =
   'https://api.pokemontcg.io/v2/sets?orderBy=-releaseDate&pageSize=250&select=id,name,series,releaseDate';
 const OUTPUT = process.argv[2] ?? 'sealed-products.json';
+const BINDER_API_URL = process.env.BINDER_API_URL ?? 'https://binder-api.bindertcg.workers.dev';
+const BINDER_API_TOKEN = process.env.BINDER_API_TOKEN;
 
 async function getJson(url, attempts = 1) {
   let lastError;
@@ -124,6 +130,48 @@ try {
   console.warn(`Could not load sets from pokemontcg.io (${e.message}); reusing yesterday's regions.`);
 }
 
+/** Name key shared by Cardmarket and pokemontcgapi.com products ("Booster Pack" = "Booster"). */
+function sealedKey(name, region) {
+  const n = normalize(name)
+    .replace(/-/g, ' ')
+    .replace(/\bpokemon( tcg)?\b/g, ' ')
+    .replace(/\bbooster pack\b/g, 'booster')
+    .replace(/\bjp\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return `${region}|${n}`;
+}
+
+/** pokemontcgapi.com sealed products by name key, or null when the Binder API is unavailable. */
+async function loadApiSealed() {
+  if (!BINDER_API_TOKEN) return null;
+  const byKey = new Map();
+  let cursor = null;
+  for (let page = 0; page < 30; page++) {
+    const url = `${BINDER_API_URL}/v1/sealed?limit=250${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+    const res = await fetch(url, { headers: { 'X-Binder-Token': BINDER_API_TOKEN } });
+    if (!res.ok) throw new Error(`Binder API returned ${res.status}`);
+    const body = await res.json();
+    for (const item of body.data ?? []) {
+      const langs = item.languages ?? [];
+      const region = langs.length === 1 && langs[0] === 'ja' ? 'japanese' : 'international';
+      byKey.set(sealedKey(item.name, region), item.id);
+    }
+    const next = body.links?.next;
+    cursor = next ? new URL(next).searchParams.get('cursor') : null;
+    if (!cursor) break;
+  }
+  return byKey;
+}
+
+let apiSealed = null;
+try {
+  apiSealed = await loadApiSealed();
+  if (!apiSealed) console.warn("No BINDER_API_TOKEN; reusing yesterday's pokemontcgapi.com ids.");
+} catch (e) {
+  console.warn(`Could not load pokemontcgapi.com sealed products (${e.message}); reusing yesterday's ids.`);
+}
+
 // Pass 1: per product, an explicit region marker and a matching international set.
 const raw = catalogue.products.map((p) => ({
   p,
@@ -166,6 +214,7 @@ const products = raw
       expansionId: p.idExpansion,
       region,
       setId,
+      apiId: apiSealed ? apiSealed.get(sealedKey(p.name, region)) ?? null : old?.apiId ?? null,
       added: String(p.dateAdded).slice(0, 10),
       trend: round(price?.trend),
       avg: round(price?.avg),
@@ -192,3 +241,4 @@ const priced = products.filter((p) => p.trend || p.avg || p.low).length;
 console.log(`Wrote ${products.length} sealed products (${priced} with a price) to ${OUTPUT}`);
 console.log(`Regions: ${count('region')}`);
 console.log(`Set logos: ${count('setId')}`);
+console.log(`Linked to pokemontcgapi.com (photos): ${products.filter((p) => p.apiId).length}`);
