@@ -34,6 +34,7 @@ const PRODUCTS_URL = `${BASE}/productList/products_nonsingles_6.json`;
 const PRICES_URL = `${BASE}/priceGuide/price_guide_6.json`;
 const SETS_URL =
   'https://api.pokemontcg.io/v2/sets?orderBy=-releaseDate&pageSize=250&select=id,name,series,releaseDate';
+const SUPPORTED_REGIONS = new Set(['international', 'japanese', 'chinese']);
 const OUTPUT = process.argv[2] ?? 'sealed-products.json';
 const BINDER_API_URL = process.env.BINDER_API_URL ?? 'https://binder-api.bindertcg.workers.dev';
 const BINDER_API_TOKEN = process.env.BINDER_API_TOKEN;
@@ -142,10 +143,44 @@ function sealedKey(name, region) {
   return `${region}|${n}`;
 }
 
-/** pokemontcgapi.com sealed products by name key, or null when the Binder API is unavailable. */
+/** Looser key: filler words ("ex", "US Version", "the") dropped and word order ignored. */
+const FILLER = new Set(['the', 'ex', 'us', 'version', 'and', 'of', 'a', 'center', 'collection']);
+function looseKey(name, region) {
+  const words = sealedKey(name, region)
+    .slice(region.length + 1)
+    .split(' ')
+    .filter((w) => w && !FILLER.has(w));
+  return `${region}|${words.sort().join(' ')}`;
+}
+
+/** Words of a Japanese set name, for matching translations that differ ("Triple Beat" / "Triplet Beat"). */
+function setWords(name) {
+  return normalize(name)
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\b(booster|box|pack|jp|japanese|pokemon|card|ex|the|high|class|enhanced|expansion|of|and)\b/g, ' ')
+    .split(' ')
+    .filter(Boolean);
+}
+
+function overlap(a, b) {
+  const A = new Set(a);
+  const B = new Set(b);
+  const shared = [...A].filter((w) => B.has(w)).length;
+  return shared / new Set([...A, ...B]).size;
+}
+
+/** Japanese booster boxes and packs on Cardmarket, by the pokemontcgapi.com kind they match. */
+function boosterKind(p) {
+  if (/case|display|bundle|deluxe|\(\d+ cards?\)/i.test(p.name)) return null;
+  if (p.category === 'Pokémon Display' && /booster box/i.test(p.name)) return 'BOOSTER_BOX';
+  if (p.category === 'Pokémon Booster') return 'BOOSTER_PACK';
+  return null;
+}
+
+/** pokemontcgapi.com's sealed products, or null when the Binder API is unavailable. */
 async function loadApiSealed() {
   if (!BINDER_API_TOKEN) return null;
-  const byKey = new Map();
+  const items = [];
   let cursor = null;
   for (let page = 0; page < 30; page++) {
     const url = `${BINDER_API_URL}/v1/sealed?limit=250${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
@@ -155,13 +190,49 @@ async function loadApiSealed() {
     for (const item of body.data ?? []) {
       const langs = item.languages ?? [];
       const region = langs.length === 1 && langs[0] === 'ja' ? 'japanese' : 'international';
-      byKey.set(sealedKey(item.name, region), item.id);
+      items.push({ id: item.id, name: item.name, kind: item.kind, set: item.set_name ?? '', region });
     }
     const next = body.links?.next;
     cursor = next ? new URL(next).searchParams.get('cursor') : null;
     if (!cursor) break;
   }
-  return byKey;
+  return items;
+}
+
+/**
+ * Sets `apiId` on products, in three passes, each only for products still unlinked:
+ * 1. the same name (sealedKey);
+ * 2. the same words, ignoring filler and order, when exactly one product has them;
+ * 3. Japanese booster boxes and packs whose set names mostly share words (translations
+ *    differ between Cardmarket and pokemontcgapi.com), when one Cardmarket product clearly
+ *    matches best. Each Cardmarket product is linked at most once in this pass.
+ */
+function linkApiIds(products, apiItems) {
+  const exact = new Map(apiItems.map((x) => [sealedKey(x.name, x.region), x.id]));
+  const loose = new Map();
+  for (const x of apiItems) {
+    const key = looseKey(x.name, x.region);
+    loose.set(key, [...(loose.get(key) ?? []), x.id]);
+  }
+  for (const p of products) {
+    p.apiId = exact.get(sealedKey(p.name, p.region)) ?? null;
+    if (p.apiId) continue;
+    const hits = loose.get(looseKey(p.name, p.region));
+    if (hits?.length === 1) p.apiId = hits[0];
+  }
+
+  const used = new Set(products.map((p) => p.apiId).filter(Boolean));
+  const free = products.filter((p) => p.region === 'japanese' && !p.apiId && boosterKind(p));
+  for (const x of apiItems) {
+    if (used.has(x.id) || x.region !== 'japanese' || /promo/i.test(x.name)) continue;
+    if (x.kind !== 'BOOSTER_BOX' && x.kind !== 'BOOSTER_PACK') continue;
+    const words = setWords(x.set || x.name);
+    const [best, second] = free
+      .filter((p) => !p.apiId && boosterKind(p) === x.kind)
+      .map((p) => ({ p, score: overlap(words, setWords(p.name)) }))
+      .sort((a, b) => b.score - a.score);
+    if (best && best.score >= 0.5 && (!second || best.score > second.score)) best.p.apiId = x.id;
+  }
 }
 
 let apiSealed = null;
@@ -214,15 +285,19 @@ const products = raw
       expansionId: p.idExpansion,
       region,
       setId,
-      apiId: apiSealed ? apiSealed.get(sealedKey(p.name, region)) ?? null : old?.apiId ?? null,
+      apiId: old?.apiId ?? null,
       added: String(p.dateAdded).slice(0, 10),
       trend: round(price?.trend),
       avg: round(price?.avg),
       low: round(price?.low),
     };
   })
+  // Binder supports international, Japanese and Chinese products only.
+  .filter((p) => SUPPORTED_REGIONS.has(p.region))
   // Newest first, so the app can show recent products before anyone types.
   .sort((a, b) => b.added.localeCompare(a.added) || b.id - a.id);
+
+if (apiSealed) linkApiIds(products, apiSealed);
 
 const feed = {
   updatedAt: priceGuide.createdAt ?? new Date().toISOString(),

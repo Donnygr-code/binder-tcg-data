@@ -4,7 +4,8 @@ Daily data feed for the Binder Pokémon TCG app.
 
 `sealed-products.json` lists every sealed Pokémon product on Cardmarket (booster boxes,
 Elite Trainer Boxes, tins, blisters, …) with its current trend, average and lowest price in EUR,
-its region (`international`, `japanese`, `chinese`, `korean`, `indonesian`, `thai`) and, when the
+its region (`international`, `japanese` or `chinese`; Binder supports no other regions, so
+Korean, Indonesian and Thai products are left out) and, when the
 name matches an international set on pokemontcg.io, that set's id (`setId`, used for the set logo). `apiId` is the matching product on
 [pokemontcgapi.com](https://pokemontcgapi.com), linked by name, which the app uses to show the
 product photo. Only that id is stored here, no photos or pokemontcgapi.com prices.
