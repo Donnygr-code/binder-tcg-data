@@ -69,7 +69,8 @@ const REGION_MARKERS = [
   ['korean', /\bkorean\b/i],
   ['indonesian', /\bindonesian\b/i],
   ['thai', /\bthai\b/i],
-  ['japanese', /\b(japanese|jp)\b/i],
+  // Gym promos and "M-P" (Mega promo) packs are only distributed in Japan.
+  ['japanese', /\b(japanese|japan|jp)\b|pok[eé]mon card gym|\bm-p promos?\b/i],
 ];
 
 const INTERNATIONAL_ONLY =
@@ -79,7 +80,7 @@ function markedRegion(name) {
   for (const [region, pattern] of REGION_MARKERS) {
     if (!pattern.test(name)) continue;
     // "JP" also appears in deck names such as WCD 2025 "JP Raging Bolt", an international product.
-    if (region === 'japanese' && INTERNATIONAL_ONLY.test(name)) return null;
+    if (region === 'japanese' && /\bwcd\b/i.test(name)) return null;
     return region;
   }
   return null;
@@ -144,7 +145,7 @@ for (const [expansionId, items] of byExpansion) {
   const set = items.find((i) => !i.marked && i.set)?.set ?? null;
   const hasBoosters = items.some((i) => /booster/i.test(i.p.name) || /Booster|Display/.test(i.p.categoryName));
   // Formats that only exist internationally; catches new sets pokemontcg.io doesn't list yet.
-  const internationalFormat = items.some((i) => INTERNATIONAL_ONLY.test(i.p.name));
+  const internationalFormat = items.some((i) => !i.marked && INTERNATIONAL_ONLY.test(i.p.name));
   const region =
     marked ?? (set || internationalFormat ? 'international' : hasBoosters ? 'japanese' : 'international');
   expansionInfo.set(expansionId, { region });
