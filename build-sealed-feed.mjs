@@ -14,8 +14,13 @@
  *   be redistributed. Needs BINDER_API_TOKEN; without it yesterday's ids are reused.
  *
  * Cardmarket has no language field, so the region is derived:
- * 1. an explicit marker in a product name ("S-Ch", "Korean", "Indonesian", "JP", ...);
- * 2. otherwise, an expansion whose products match an international set is international;
+ * 1. an explicit marker in a product name ("S-Ch", "Korean", "Indonesian", "JP", ...); in a
+ *    Japanese set's expansion that also holds its Taiwanese print ("Traditional Chinese Ninja
+ *    Spinner Value Set"), the plain "Ninja Spinner Booster (Box)" products stay Japanese;
+ * 2. otherwise, an expansion with Japanese-only formats ("Enhanced Expansion Pack", "High
+ *    Class Pack") is Japanese, even when its name matches an international set (Pokémon GO);
+ *    then an expansion whose products match an international set is international (EX-era
+ *    sets only with Cardmarket's "EX" prefix, so "Dragon Storm" isn't EX "Dragon");
  * 3. otherwise, an expansion with international-only formats (Elite Trainer Boxes, sleeved
  *    boosters, blisters, ...) is international, e.g. a new set pokemontcg.io doesn't list yet;
  * 4. otherwise, an expansion that contains boosters is a Japanese-only set
@@ -68,11 +73,13 @@ const normalize = (s) =>
     .replace(/\s+/g, ' ')
     .trim();
 
+const CHINESE_SET_CODE = /^[A-Za-z0-9.]*C:/;
+
 /** Explicit region markers in product names. Order matters: the first match wins. */
 const REGION_MARKERS = [
   ['chinese', /\b(s-ch|t-ch|chinese)\b/i],
   // Chinese products also use set codes ending in a capital C, e.g. "CSV10.5C:", "CBB6C:", "151C:".
-  ['chinese', /^[A-Za-z0-9.]*C:/],
+  ['chinese', CHINESE_SET_CODE],
   ['korean', /\bkorean\b/i],
   ['indonesian', /\bindonesian\b/i],
   ['thai', /\bthai\b/i],
@@ -82,6 +89,9 @@ const REGION_MARKERS = [
 
 const INTERNATIONAL_ONLY =
   /elite trainer box|sleeved booster|booster bundle|build (&|and) battle|checklane|blister|prize pack|world championships?|\bwcd\b|general mills|mcdonald|trick or trade/i;
+
+/** Japanese product formats ("Enhanced Expansion Pack", "High Class Pack"); never international. */
+const JAPANESE_ONLY = /enhanced expansion pack|strength expansion pack|high class pack|concept pack/i;
 
 function markedRegion(name) {
   for (const [region, pattern] of REGION_MARKERS) {
@@ -97,11 +107,13 @@ function markedRegion(name) {
 function matchSet(name, sets) {
   const full = normalize(name.replace(/^[A-Za-z0-9.]+:\s*/, ''));
   // Cardmarket calls old sets "EX Ruby & Sapphire"; pokemontcg.io calls them "Ruby & Sapphire".
-  const candidates = [full, full.replace(/^ex /, '')];
+  // EX-era sets only match with that "EX" prefix, so Japanese "Dragon Storm" isn't EX "Dragon".
+  const withoutEx = full.startsWith('ex ') ? full.slice(3) : null;
   let best = null;
   for (const set of sets) {
     if (set.key.length < 3) continue;
-    const hit = candidates.some((n) => n === set.key || n.startsWith(`${set.key} `));
+    const candidates = set.series === 'EX' ? [withoutEx] : [full, withoutEx];
+    const hit = candidates.some((n) => n && (n === set.key || n.startsWith(`${set.key} `)));
     if (hit && (!best || set.key.length > best.key.length)) best = set;
   }
   return best;
@@ -126,7 +138,7 @@ const prices = new Map(priceGuide.priceGuides.map((p) => [p.idProduct, p]));
 let sets = null;
 try {
   const res = await getJson(SETS_URL, 20);
-  sets = res.data.map((s) => ({ id: s.id, key: normalize(s.name) }));
+  sets = res.data.map((s) => ({ id: s.id, key: normalize(s.name), series: s.series }));
 } catch (e) {
   console.warn(`Could not load sets from pokemontcg.io (${e.message}); reusing yesterday's regions.`);
 }
@@ -265,9 +277,32 @@ for (const [expansionId, items] of byExpansion) {
   const hasBoosters = items.some((i) => /booster/i.test(i.p.name) || /Booster|Display/.test(i.p.categoryName));
   // Formats that only exist internationally; catches new sets pokemontcg.io doesn't list yet.
   const internationalFormat = items.some((i) => !i.marked && INTERNATIONAL_ONLY.test(i.p.name));
+  // Formats that only exist in Japan; wins over a set match ("Pokémon GO Enhanced Expansion
+  // Pack" is Japanese although international "Pokémon GO" matches its name).
+  const japaneseFormat = items.some((i) => !i.marked && JAPANESE_ONLY.test(i.p.name));
   const region =
-    marked ?? (set || internationalFormat ? 'international' : hasBoosters ? 'japanese' : 'international');
-  expansionInfo.set(expansionId, { region });
+    marked ??
+    (japaneseFormat
+      ? 'japanese'
+      : set || internationalFormat
+        ? 'international'
+        : hasBoosters
+          ? 'japanese'
+          : 'international');
+  // Japanese sets can share an expansion with their Taiwanese print ("Traditional Chinese Ninja
+  // Spinner Value Set"); the plain "Ninja Spinner Booster (Box)" products there are Japanese.
+  const taiwanese = items
+    .filter((i) => i.marked === 'chinese' && /traditional chinese|\bt-ch\b/i.test(i.p.name))
+    .map((i) => normalize(i.p.name));
+  const japaneseIds = new Set(
+    items
+      .filter((i) => {
+        const base = !i.marked && i.p.name.match(/^(.+?) booster( box)?( case)?$/i)?.[1];
+        return base && taiwanese.some((n) => n.includes(normalize(base)));
+      })
+      .map((i) => i.p.idProduct)
+  );
+  expansionInfo.set(expansionId, { region, japaneseIds });
 }
 
 const products = raw
@@ -275,7 +310,7 @@ const products = raw
     const price = prices.get(p.idProduct);
     const info = expansionInfo.get(p.idExpansion);
     const old = previous.get(p.idProduct);
-    const region = sets ? marked ?? info.region : old?.region ?? marked ?? 'international';
+    const region = sets ? marked ?? (info.japaneseIds.has(p.idProduct) ? 'japanese' : info.region) : old?.region ?? marked ?? 'international';
     // Only a product's own name decides its set: expansions on Cardmarket can mix sets.
     const setId = sets ? (region === 'international' ? set?.id ?? null : null) : old?.setId ?? null;
     return {
