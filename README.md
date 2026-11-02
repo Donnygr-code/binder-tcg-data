@@ -27,3 +27,12 @@ node build-sealed-feed.mjs
 Without a `BINDER_API_TOKEN` environment variable the previous `apiId` values are kept.
 
 Prices are Cardmarket's; this repository only reformats them.
+
+## Release calendar
+
+`release-calendar.json` lists announced sets that are not out yet, kept by hand from official
+announcements. The Chase TCG Worker reads it every morning: a new entry is announced to those with
+new-set notifications on ("Coming 6 November: Delta Reign"), and on its release day they get "Out
+Today". Each entry has a stable `id` (never reuse one), a `name`, a `region` (`international`,
+`japanese` or `chinese`) and a `releaseDate` (`YYYY-MM-DD`). Add a set once its date is official;
+a changed date can simply be edited. Entries can stay after release.

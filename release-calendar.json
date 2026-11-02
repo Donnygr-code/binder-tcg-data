@@ -1,0 +1,17 @@
+{
+  "updatedAt": "2026-11-02",
+  "sets": [
+    {
+      "id": "delta-reign",
+      "name": "Delta Reign",
+      "region": "international",
+      "releaseDate": "2026-11-06"
+    },
+    {
+      "id": "aura-seeker",
+      "name": "Aura Seeker",
+      "region": "japanese",
+      "releaseDate": "2026-11-27"
+    }
+  ]
+}
